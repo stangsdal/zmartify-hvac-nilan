@@ -254,9 +254,16 @@ Nilan-specific modules:
 }
 ```
 
-Advertise capability schema 2.0 and omit optional sensors until verified. Support `homie/5/<device-id>` discovery and MQTT v2 envelopes with schema version, command ID, command type, target, parameters and timestamps.
+The current adapter publishes read-only state at `homie/5/<device-id>/nilan/state`
+and `zmartify/v2/devices/<device-id>/state/hvac`. It does not yet publish Homie
+discovery metadata or consume command topics. The production adapter must
+advertise capability schema 2.0, omit optional sensors until verified and use
+MQTT v2 envelopes with schema version, command ID, command type, target,
+parameters and timestamps.
 
-Recommended commands: `hvac.set_run_state`, `hvac.set_operation_mode`, `hvac.set_ventilation_level`, `hvac.set_temperature_setpoint`, `hvac.reset_alarm`.
+Recommended future commands: `hvac.set_run_state`, `hvac.set_operation_mode`,
+`hvac.set_ventilation_level`, `hvac.set_temperature_setpoint` and
+`hvac.reset_alarm`. No command is enabled in the current firmware increment.
 
 The reported state should contain `controller_online`, `freshness_age_ms`, run/mode/state, requested and actual ventilation, temperatures, air quality, bypass/defrost, filter and alarms. Edge should represent this as one HVAC device, not artificial zones/channels. If legacy API compatibility requires a zone, use one stable virtual zone named `Ventilation` only at the boundary.
 
@@ -267,7 +274,10 @@ The reported state should contain `controller_online`, `freshness_age_ms`, run/m
 - Wi-Fi/MQTT loss does not stop local polling or the last valid local operation.
 - On timeout, mark `controller_online=false` after a bounded threshold and retain last-known values with freshness age.
 - Reject writes while unavailable, busy or expired; rate-limit and coalesce slider updates.
-- Authenticate the local API in normal operation; disable debug endpoints by default.
+- The current `/api/v1/nilan/state` endpoint is a read-only commissioning
+  endpoint. It must not be treated as the production authenticated API.
+- Authenticate the local API in normal operation and disable commissioning/debug
+  endpoints by default.
 - Never log passwords, tokens, claim data or raw credential payloads.
 
 ## 9. Commissioning

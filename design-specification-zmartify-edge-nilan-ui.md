@@ -4,6 +4,45 @@ Status: design draft
 Date: 2026-08-26  
 Product surface: `zmartify-edge` app
 
+## 0. Implementation status and current adapter boundary
+
+The first firmware increment is now implemented as a read-only edge adapter.
+This section records the current behavior so the target UI/API contract is not
+mistaken for functionality already available on the device.
+
+Implemented in firmware:
+
+- A single Nilan device identity: `zmartify-hvac-nilan-<last-three-MAC-bytes>`.
+- CTS602 polling every 2 seconds through the shared AHC9000 board and RS485
+  transport, using 19200 baud, 8 data bits, even parity and one stop bit.
+- Read-only state endpoint: `GET /api/v1/nilan/state`.
+- Read-only state publication to `homie/5/<device-id>/nilan/state` and
+  `zmartify/v2/devices/<device-id>/state/hvac` every 5 seconds when MQTT is
+  connected.
+- MQTT connection settings are read from the existing `cfg` NVS namespace
+  (`mqtt_enabled`, `mqtt_uri`, `mqtt_username`, `mqtt_password`). Credentials
+  are not logged or included in state payloads.
+- Fresh/stale/unavailable state and basic poll request/response counters.
+
+The current JSON projection still contains numeric fields for humidity and CO2
+because the low-level MVP model has not yet added per-sensor availability flags.
+The UI must therefore not treat those values as present until a verified
+capability/readback layer supplies them; the production contract remains
+`null`/`Not available` for absent sensors.
+
+Not yet implemented and therefore not to be presented as available in Edge:
+
+- MQTT Homie discovery metadata, command subscriptions and asynchronous command
+  outcomes.
+- Authenticated API integration with the shared Edge authorization model. The
+  current local endpoint is a commissioning read-only endpoint and must not be
+  exposed as the production mobile API.
+- Run/mode/setpoint writes, alarm reset, schedules, boost and asymmetric airflow.
+- Complete alarm, bypass, defrost, capability and optional-sensor semantics.
+
+Until those items are implemented, the Edge UI should use the adapter as a
+read-only diagnostics/commissioning source and keep all operate controls hidden.
+
 ## 1. Product intent
 
 The user experiences the Nilan Comfort 302 as a home-comfort product, not as a Modbus gateway. The first question answered is: “Is my home comfortable and is ventilation operating normally?” Technical details remain available for owners/installers, but not in the normal flow.
@@ -46,7 +85,11 @@ Above the fold:
       Auto     Humidity 48%     [Details]
 ```
 
-Primary actions are setpoint, ventilation level, approved run state and supported operation mode. Show a pending state immediately after a change; show confirmed/failed from the asynchronous device outcome. Never show register numbers, MQTT topics or function codes on this screen.
+The target product will make setpoint, ventilation level, approved run state and
+supported operation mode primary actions. In the current adapter increment no
+write controls may be shown. Once writes exist, show a pending state immediately
+after a change and confirmed/failed from the asynchronous device outcome. Never
+show register numbers, MQTT topics or function codes on this screen.
 
 ## 4. Detail cards
 
@@ -92,7 +135,7 @@ User settings: display name, units, notification preferences and comfort default
 
 Owner/installer settings: Modbus address only behind authorization and a warning that changing it may disconnect the controller; sensor availability/source; firmware and OTA status; device reboot.
 
-Diagnostics: controller online, last successful poll, poll age, read/write/timeout/CRC counters, firmware, device ID, product model, raw alarm IDs and MQTT status. Raw registers may be expandable for service use but never editable through a generic field.
+Diagnostics: controller online, last successful poll, poll age, read/write/timeout/CRC counters, firmware, device ID, product model, raw alarm IDs and MQTT status. The current adapter exposes read-only poll request/response counters and freshness through the state endpoint; remaining diagnostics are a later API extension. Raw registers may be expandable for service use but never editable through a generic field.
 
 ## 8. Permissions
 
@@ -104,7 +147,11 @@ Use existing site roles:
 | User | Yes | Yes | No |
 | Owner | Yes | Yes | Yes |
 
-The UI hides unauthorized controls, while API authorization remains authoritative. Viewers still see alarms and offline status. Owner-only routes must not become accessible by manually changing a URL.
+The UI hides unauthorized controls, while API authorization remains authoritative.
+The current firmware commissioning endpoint is read-only but is not the final
+authenticated Edge API; it must be placed behind the approved local access
+boundary during commissioning. Viewers still see alarms and offline status.
+Owner-only routes must not become accessible by manually changing a URL.
 
 ## 9. Realtime and command states
 
@@ -160,7 +207,11 @@ type NilanHvacState = {
 };
 ```
 
-Writes should return `command_id`, `pending`, `command_state` and the updated projection. Persist outcomes and freshness so reload does not lose an in-flight or failed operation.
+The production API writes should return `command_id`, `pending`, `command_state`
+and the updated projection. The current adapter has no write endpoint and returns
+only a read-only projection; it must not claim command acceptance or confirmation.
+Persist outcomes and freshness so reload does not lose an in-flight or failed
+operation.
 
 For Home Automation integrations, keep the semantic command stable and transport-independent:
 
@@ -181,9 +232,13 @@ The API response and realtime outcome must distinguish `pending`, `confirmed`, `
 
 ## 12. Delivery phases
 
-1. Observe: device card, online/freshness, temperatures, fan levels, bypass/defrost, filter and alarms; no app writes.
-2. Operate: setpoint, ventilation, run state and supported mode with realtime outcomes and role enforcement.
-3. Comfort automation: boost, temporary overrides and validated schedule read/edit.
+1. Observe (current adapter scope): device card, online/freshness, temperatures,
+   fan levels and filter telemetry where confirmed; no app writes.
+2. Complete observe contract: authenticated API, Homie discovery, capability
+   advertisement, alarms, bypass/defrost and explicit unavailable sensor values.
+3. Operate: setpoint, ventilation, run state and supported mode with realtime
+   outcomes and role enforcement.
+4. Comfort automation: boost, temporary overrides and validated schedule read/edit.
 4. Service: owner/installer diagnostics and validated configuration view; no factory settings.
 
 ## 13. Acceptance criteria
