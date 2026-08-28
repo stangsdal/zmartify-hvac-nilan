@@ -11,6 +11,8 @@ bool nilan_decode_state(const uint16_t *control, size_t control_count,
         ventilation_count < 5 || temperature_count < 7) return false;
     state->raw[0] = control[0]; state->raw[1] = control[1];
     state->raw[2] = control[2]; state->raw[3] = control[3];
+    for (size_t i = 0; i < ventilation_count && i < 5; ++i) state->raw_ventilation[i] = ventilation[i];
+    for (size_t i = 0; i < temperature_count && i < 7; ++i) state->raw_temperature[i] = temperatures[i];
     state->run = control[0] != 0;
     state->ventilation_level = (uint8_t)ventilation[0];
     state->actual_inlet_level = (uint8_t)ventilation[1];
@@ -22,6 +24,13 @@ bool nilan_decode_state(const uint16_t *control, size_t control_count,
     state->extract_temperature_centi_c = signed100(temperatures[3]);
     state->humidity_centi_pct = (int16_t)temperatures[4];
     state->co2_ppm = temperatures[5];
+    /* CTS602 installations may omit room and CO2 sensors. The observed raw
+       values (1 and 0xd8f0) are not physical measurements. Keep the raw
+       words available for protocol work, but do not publish false telemetry. */
+    state->room_temperature_available = temperatures[0] != 1 &&
+                                        state->room_temperature_centi_c >= -4000 &&
+                                        state->room_temperature_centi_c <= 8000;
+    state->co2_available = temperatures[5] <= 5000;
     state->status = NILAN_VALUE_FRESH;
     return true;
 }

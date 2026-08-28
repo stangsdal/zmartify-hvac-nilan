@@ -47,3 +47,14 @@ bool nilan_validate_read_response(const uint8_t *frame, size_t length, uint8_t s
     if (payload_length) *payload_length = frame[2];
     return true;
 }
+
+bool nilan_validate_write_response(const uint8_t *frame, size_t length, uint8_t slave,
+                                   uint16_t offset, uint16_t quantity)
+{
+    if (!frame || length != 8 || frame[0] != slave || frame[1] != 16 ||
+        frame[2] != (uint8_t)(offset >> 8) || frame[3] != (uint8_t)offset ||
+        frame[4] != (uint8_t)(quantity >> 8) || frame[5] != (uint8_t)quantity) return false;
+    uint16_t expected = nilan_modbus_crc16(frame, length - 2);
+    uint16_t received = (uint16_t)frame[length - 2] | ((uint16_t)frame[length - 1] << 8);
+    return expected == received;
+}

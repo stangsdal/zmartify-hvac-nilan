@@ -6,7 +6,8 @@ Product surface: `zmartify-edge` app
 
 ## 0. Implementation status and current adapter boundary
 
-The first firmware increment is now implemented as a read-only edge adapter.
+The first firmware increment is now implemented as a commissioning edge
+adapter with read-only telemetry and guarded development/MQTT operations.
 This section records the current behavior so the target UI/API contract is not
 mistaken for functionality already available on the device.
 
@@ -15,10 +16,17 @@ Implemented in firmware:
 - A single Nilan device identity: `zmartify-hvac-nilan-<last-three-MAC-bytes>`.
 - CTS602 polling every 2 seconds through the shared AHC9000 board and RS485
   transport, using 19200 baud, 8 data bits, even parity and one stop bit.
-- Read-only state endpoint: `GET /api/v1/nilan/state`.
+- Read-only development endpoints: `GET /health`, `GET /status`, `GET /version`
+  and `GET /api/v1/nilan/state`.
 - Read-only state publication to `homie/5/<device-id>/nilan/state` and
   `zmartify/v2/devices/<device-id>/state/hvac` every 5 seconds when MQTT is
   connected.
+- Basic Homie v5 `$description` and `$state` lifecycle publication when MQTT
+  connects.
+- Edge-compatible `/identity`, `/claim-token`, `/onboarding/status` and
+  `/onboarding/configure` endpoints with NVS credential storage.
+- Nilan MQTT v2 ventilation and output-speed command subscriptions with
+  read-back-based command outcomes, enabled by a compile-time feature flag.
 - MQTT connection settings are read from the existing `cfg` NVS namespace
   (`mqtt_enabled`, `mqtt_uri`, `mqtt_username`, `mqtt_password`). Credentials
   are not logged or included in state payloads.
@@ -32,12 +40,15 @@ capability/readback layer supplies them; the production contract remains
 
 Not yet implemented and therefore not to be presented as available in Edge:
 
-- MQTT Homie discovery metadata, command subscriptions and asynchronous command
-  outcomes.
-- Authenticated API integration with the shared Edge authorization model. The
-  current local endpoint is a commissioning read-only endpoint and must not be
-  exposed as the production mobile API.
-- Run/mode/setpoint writes, alarm reset, schedules, boost and asymmetric airflow.
+- Complete MQTT Homie discovery metadata, command subscriptions and
+  asynchronous command outcomes. Basic discovery lifecycle topics exist, but
+  the state model is not yet exposed as the final per-property Homie contract.
+- Full authenticated Edge API integration. Provisioned bearer authorization
+  now protects write, OTA and reboot routes; production Edge authorization and
+  role enforcement remain outside the device-local boundary.
+- Run/mode/setpoint writes, alarm reset, schedules, boost and complete
+  asymmetric airflow.
+- Edge-staged pull OTA and MQTT-triggered OTA polling.
 - Complete alarm, bypass, defrost, capability and optional-sensor semantics.
 
 Until those items are implemented, the Edge UI should use the adapter as a
@@ -148,9 +159,11 @@ Use existing site roles:
 | Owner | Yes | Yes | Yes |
 
 The UI hides unauthorized controls, while API authorization remains authoritative.
-The current firmware commissioning endpoint is read-only but is not the final
+The current firmware commissioning endpoints are not the final
 authenticated Edge API; it must be placed behind the approved local access
 boundary during commissioning. Viewers still see alarms and offline status.
+The OTA and reboot routes are compile-time gated by
+`CONFIG_NILAN_ENABLE_DEV_OTA` and are not authenticated.
 Owner-only routes must not become accessible by manually changing a URL.
 
 ## 9. Realtime and command states

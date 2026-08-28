@@ -1,0 +1,28 @@
+config NILAN_ENABLE_DEV_OTA
+    bool "Enable local development OTA and reboot endpoints"
+    default y
+    help
+        Enable unauthenticated local-network OTA and reboot endpoints for
+        commissioning. Disable this option for production firmware until the
+        endpoint has authentication and transport protection.
+
+config NILAN_ENABLE_DEV_DIAGNOSTICS
+    bool "Enable local raw CTS602 diagnostics"
+    default y
+    help
+        Expose raw read-only CTS602 register words for commissioning. Disable
+        this option for production firmware.
+
+config NILAN_ENABLE_DEV_WRITES
+    bool "Enable local development write tests"
+    default y
+    help
+        Enable the bounded ventilation write endpoint for commissioning.
+        Disable this option for production firmware.
+
+config NILAN_ENABLE_MQTT_COMMANDS
+    bool "Enable Nilan MQTT v2 command subscriptions"
+    default n
+    help
+        Subscribe to validated Nilan command topics. Disable until MQTT ACL
+        provisioning and production authorization are in place.

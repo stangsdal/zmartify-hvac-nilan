@@ -1,6 +1,6 @@
 # Design specification: ESP32 controller for Nilan Comfort 302 / CTS602
 
-Status: design draft  
+Status: commissioning-validated draft
 Date: 2026-08-26  
 Target repository: `stangsdal/zmartify-hvac-nilan`
 
@@ -179,9 +179,24 @@ MVP writes:
 
 For each write: validate in Edge and firmware; serialize with polling; use function 16; re-read affected state; publish an asynchronous terminal outcome. Alarm reset confirmation means the alarm was re-read, not that the fault was repaired. Installer/service registers are never writable from the normal user path.
 
+Commissioning validation has confirmed a temporary inlet-speed override through
+holding register `H:201` (`Output.InletSpeed`), expressed as 0-100% and released
+with 0%. The implementation requires a holding-register read-back. This remains
+a development-only operation. The matching exhaust-side output register `H:200`
+is implemented behind the same gate, but the target Comfort 302 returned 30%
+when 70% was requested. The write was therefore correctly reported as failed
+and the override was released again. H:200 is not a confirmed independent
+exhaust-control capability on this installation.
+
 ### Asymmetric airflow and cooker-hood profile
 
-The API must be designed now for asymmetric airflow, even though the supplied CTS602 Modbus specification does not document separate write registers for inlet and exhaust fan levels. It documents the requested ventilation step at holding register 1003 and the actual inlet/exhaust levels at input registers 1101 and 1102. The installation/HMI material does describe separate inlet and exhaust settings and a cooker-hood user function, so this is a capability to validate rather than silently assume.
+The API must be designed now for asymmetric airflow. The CTS602 specification
+documents the requested ventilation step at holding register 1003, actual
+inlet/exhaust levels at input registers 1101 and 1102, and output values at
+holding registers H:200/H:201. On the target Comfort 302, H:201 has now been
+validated as a temporary independent inlet override with read-back. H:200 has
+been exercised, but did not read back the requested value (70% requested, 30%
+returned), so a complete paired asymmetric profile is not supported yet.
 
 Expose a capability-driven command at the semantic API boundary:
 
@@ -203,11 +218,15 @@ Use `inlet_level` for indblæsning/tilluft and `exhaust_level` for udsugning/fra
 
 Implement the capability in three possible tiers:
 
-1. **Direct asymmetric command:** use a validated CTS602 mechanism or register mapping that independently sets the two fan levels. This is the preferred result if confirmed on the target Comfort 302 firmware.
+1. **Direct asymmetric command:** use the validated output-register mechanism when both sides have been confirmed on the target Comfort 302 firmware. Inlet override is `confirmed`; exhaust override is currently `unsupported` on this installation pending a documented controller configuration or alternative supported function.
 2. **Named Nilan user function:** activate the documented cooker-hood/user-function path through the supported registers, while reporting the configured resulting inlet/exhaust levels and actual read-back. This is the safe fallback if CTS602 owns the exact fan values.
 3. **Unsupported:** report `unsupported` and do not emulate asymmetry by repeatedly writing the global ventilation step.
 
-Do not write input registers 1101/1102; they are telemetry. Do not write output registers 200/201 as a shortcut: those are documented output telemetry, not a safe public control interface. If direct control cannot be verified, the API must still retain the stable semantic command shape so a later firmware capability can implement it without changing the Home Automation integration.
+Do not write input registers 1101/1102; they are telemetry. Keep H:200/H:201
+behind the commissioning write gate and mandatory read-back; they must not be
+exposed as generic public register writes. If the exhaust-side behavior cannot
+be verified, the API must report asymmetric control as partial/unsupported
+rather than emulate it by repeatedly writing the global ventilation step.
 
 The reported state should include:
 
@@ -255,21 +274,28 @@ Nilan-specific modules:
 ```
 
 The current adapter publishes read-only state at `homie/5/<device-id>/nilan/state`
-and `zmartify/v2/devices/<device-id>/state/hvac`. It does not yet publish Homie
-discovery metadata or consume command topics. The production adapter must
+and `zmartify/v2/devices/<device-id>/state/hvac`. It now also publishes basic
+Homie v5 `$description` and `$state` lifecycle topics. It does not yet consume
+command topics. It now supports bounded Nilan MQTT v2 ventilation/output
+commands and read-back outcomes behind a compile-time commissioning flag. The
+production adapter must
 advertise capability schema 2.0, omit optional sensors until verified and use
 MQTT v2 envelopes with schema version, command ID, command type, target,
 parameters and timestamps.
 
 Recommended future commands: `hvac.set_run_state`, `hvac.set_operation_mode`,
 `hvac.set_ventilation_level`, `hvac.set_temperature_setpoint` and
-`hvac.reset_alarm`. No command is enabled in the current firmware increment.
+`hvac.reset_alarm`. The current firmware increment enables only local,
+development-gated commissioning writes for global ventilation and the two
+output-register experiments; it does not consume production MQTT command
+topics.
 
 The reported state should contain `controller_online`, `freshness_age_ms`, run/mode/state, requested and actual ventilation, temperatures, air quality, bypass/defrost, filter and alarms. Edge should represent this as one HVAC device, not artificial zones/channels. If legacy API compatibility requires a zone, use one stable virtual zone named `Ventilation` only at the boundary.
 
 ## 8. Safety and failure behavior
 
-- Firmware starts read-only; local commissioning explicitly enables writes.
+- Release firmware starts read-only; the current development configuration
+  explicitly enables only the bounded local commissioning writes.
 - CTS602 remains authority for frost, airflow, heater, fire and sensor protection.
 - Wi-Fi/MQTT loss does not stop local polling or the last valid local operation.
 - On timeout, mark `controller_online=false` after a bounded threshold and retain last-known values with freshness age.
@@ -286,9 +312,13 @@ The reported state should contain `controller_online`, `freshness_age_ms`, run/m
 2. Connect only CN7 A, B and GND; never connect CN7 12 V to the ESP32.
 3. Verify address 30, 8E1 transport and read-only identity/status.
 4. Capture baseline status, temperatures, fan levels, display and alarms.
-5. Validate one write at a time: fan level, setpoint, run and alarm reset.
+5. Validate one write at a time: global fan level and temporary inlet override.
+   H:200 exhaust override is currently a documented failed read-back test;
+   setpoint, run and alarm reset remain uncommissioned.
 6. Test coexistence with the physical CTS602 panel and document the supported policy.
-7. Validate MQTT state/outcomes, Edge twin freshness, onboarding, OTA and rollback.
+7. Validate MQTT state/outcomes, Edge twin freshness, onboarding, authenticated
+   local operations, OTA and rollback. Edge-staged pull OTA is implemented;
+   end-to-end staging still requires a staged Edge artifact.
 8. Test ESP32 reboot, Wi-Fi/broker loss, Modbus cable removal and malformed commands.
 
 ## 10. Acceptance criteria

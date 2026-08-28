@@ -4,7 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NILAN_FIRMWARE_VERSION "0.1.0"
+#define NILAN_FIRMWARE_VERSION "0.2.0"
+#define NILAN_BUS_VERSION "CTS602-Modbus-RTU-1"
 #define NILAN_DEFAULT_SLAVE_ADDRESS 30
 #define NILAN_MODBUS_BAUD 19200
 #define NILAN_MODBUS_FRAME_MAX 256
@@ -26,12 +27,17 @@ typedef enum {
 
 typedef struct {
     uint16_t raw[7];
+    uint16_t raw_ventilation[5];
+    uint16_t raw_temperature[7];
+    uint16_t raw_alarms[10];
     int16_t room_temperature_centi_c;
     int16_t inlet_temperature_centi_c;
     int16_t outlet_temperature_centi_c;
     int16_t extract_temperature_centi_c;
     int16_t humidity_centi_pct;
     uint16_t co2_ppm;
+    bool room_temperature_available;
+    bool co2_available;
     uint8_t ventilation_level;
     uint8_t actual_inlet_level;
     uint8_t actual_exhaust_level;
@@ -66,6 +72,12 @@ typedef struct {
     uint32_t retry_count;
     bool controller_online;
     uint32_t last_success_ms;
+    uint32_t write_success_count;
+    uint32_t write_error_count;
+    uint16_t last_write_requested;
+    uint16_t last_write_readback;
+    bool last_write_ok;
+    uint32_t last_write_ms;
 } nilan_poll_stats_t;
 
 /* Protocol offsets from the CTS602 document, not global 3xxxx/4xxxx addresses. */
@@ -79,6 +91,8 @@ enum {
     NILAN_HOLDING_MODE = 1002,
     NILAN_HOLDING_VENTILATION = 1003,
     NILAN_HOLDING_SETPOINT = 1004,
+    NILAN_HOLDING_EXHAUST_SPEED = 200,
+    NILAN_HOLDING_INLET_SPEED = 201,
 };
 
 uint16_t nilan_modbus_crc16(const uint8_t *data, size_t length);
@@ -89,6 +103,8 @@ size_t nilan_build_write_request(uint8_t slave, uint16_t offset, uint16_t value,
 bool nilan_validate_read_response(const uint8_t *frame, size_t length, uint8_t slave,
                                   uint8_t function, uint8_t *payload, size_t payload_size,
                                   size_t *payload_length);
+bool nilan_validate_write_response(const uint8_t *frame, size_t length, uint8_t slave,
+                                   uint16_t offset, uint16_t quantity);
 bool nilan_decode_state(const uint16_t *control, size_t control_count,
                         const uint16_t *ventilation, size_t ventilation_count,
                         const uint16_t *temperatures, size_t temperature_count,
@@ -98,3 +114,6 @@ bool nilan_validate_command(const nilan_command_t *command);
 /* Starts the read-only CTS602 poller on an already started shared RS485 bus. */
 bool nilan_adapter_start(uint8_t slave_address);
 bool nilan_adapter_get_state(nilan_state_t *out_state, nilan_poll_stats_t *out_stats);
+bool nilan_adapter_set_ventilation(uint8_t level, uint16_t *out_readback);
+bool nilan_adapter_set_inlet_speed_pct(uint16_t pct, uint16_t *out_readback);
+bool nilan_adapter_set_exhaust_speed_pct(uint16_t pct, uint16_t *out_readback);

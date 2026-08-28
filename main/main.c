@@ -3,10 +3,12 @@
 #include "esp_log.h"
 #include "board.h"
 #include "comm_rs485.h"
+#include "esp_netif.h"
 #include "nilan_cts602.h"
 #include "nilan_edge.h"
 #include "net.h"
 #include "nvs_flash.h"
+#include "ota.h"
 
 static const char *TAG = "nilan";
 
@@ -14,11 +16,18 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Zmartify Nilan CTS602 firmware %s", NILAN_FIRMWARE_VERSION);
     ESP_ERROR_CHECK(nvs_flash_init());
+    const ota_config_t ota_cfg = {.rollback_enabled = true};
+    ESP_ERROR_CHECK(ota_init(&ota_cfg));
+    ESP_ERROR_CHECK(ota_start_service());
     const net_config_t net_cfg = {
         .wifi_ssid = NULL, .wifi_password = NULL,
         .hostname = "zmartify-hvac-nilan", .enable_ap_fallback = true,
     };
     ESP_ERROR_CHECK(net_init(&net_cfg));
+    esp_netif_t *wifi_sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (wifi_sta == NULL || esp_netif_set_hostname(wifi_sta, "zmartify-hvac-nilan") != ESP_OK) {
+        ESP_LOGW(TAG, "Could not set Wi-Fi DHCP hostname to zmartify-hvac-nilan");
+    }
     ESP_ERROR_CHECK(net_start());
     board_config_t board_cfg;
     board_get_default_config(&board_cfg);
@@ -57,6 +66,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Nilan Edge adapter failed to start");
         return;
     }
+    ESP_ERROR_CHECK(ota_finalize_boot_validation(true));
     ESP_LOGI(TAG, "Nilan state API and MQTT publisher started");
 
     while (true) {
