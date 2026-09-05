@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
@@ -123,6 +124,28 @@ static int state_json(char *out, size_t out_len)
                     state.status == NILAN_VALUE_FRESH ? "fresh" :
                     (state.status == NILAN_VALUE_STALE ? "stale" : "unavailable"),
                     stats.request_count, stats.response_count);
+}
+
+static bool source_timestamp(char *out, size_t out_len)
+{
+    if (out == NULL || out_len < 21U) return false;
+    time_t now = time(NULL);
+    struct tm utc = {0};
+    if (now < 1700000000 || gmtime_r(&now, &utc) == NULL) return false;
+    return strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &utc) > 0U;
+}
+
+static int mqtt_state_json(char *out, size_t out_len)
+{
+    char state[1600];
+    char timestamp[32];
+    if (state_json(state, sizeof(state)) < 0 || !source_timestamp(timestamp, sizeof(timestamp))) return -1;
+    const esp_app_desc_t *app = esp_app_get_description();
+    return snprintf(out, out_len,
+                    "{\"schema_version\":\"2.0\",\"source_timestamp\":\"%s\","
+                    "\"firmware_version\":\"%s\",\"online\":true,\"mqtt_connected\":true,"
+                    "\"hvac\":{\"nilan\":%s}}",
+                    timestamp, app != NULL ? app->version : NILAN_FIRMWARE_VERSION, state);
 }
 
 static esp_err_t raw_get_handler(httpd_req_t *req)
@@ -405,8 +428,8 @@ static esp_err_t state_get_handler(httpd_req_t *req)
 static void mqtt_publish_state(void)
 {
     if (!s_mqtt) return;
-    char payload[1600], topic[192];
-    const int len = state_json(payload, sizeof(payload));
+    char payload[1900], topic[192];
+    const int len = mqtt_state_json(payload, sizeof(payload));
     if (len < 0 || (size_t)len >= sizeof(payload)) return;
     (void)snprintf(topic, sizeof(topic), "homie/5/%s/nilan/state", s_device_id);
     (void)esp_mqtt_client_publish(s_mqtt, topic, payload, len, 1, 1);

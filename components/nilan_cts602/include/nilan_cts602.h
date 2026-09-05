@@ -4,7 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NILAN_FIRMWARE_VERSION "0.2.0"
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#define NILAN_FIRMWARE_VERSION CONFIG_APP_PROJECT_VER
+#else
+#define NILAN_FIRMWARE_VERSION "host-test"
+#endif
 #define NILAN_BUS_VERSION "CTS602-Modbus-RTU-1"
 #define NILAN_DEFAULT_SLAVE_ADDRESS 30
 #define NILAN_MODBUS_BAUD 19200

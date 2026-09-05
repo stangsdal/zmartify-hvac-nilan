@@ -84,6 +84,17 @@ component source.
 
 ## Build and test
 
+See [`docs/edge-compatibility-improvement-guide.md`](docs/edge-compatibility-improvement-guide.md)
+for the production OTA, HTTP, MQTT v2 and `zmartify-edge` compatibility
+requirements.
+
+Before building an image intended for OTA or deployment, bump
+`CONFIG_APP_PROJECT_VER` in `sdkconfig.defaults` using semantic versioning.
+ESP-IDF embeds that value in the image and the Nilan API reports it as the
+firmware version. The Edge-compatible build artifact is always
+`build/zmartify_hvac_nilan.bin`; Edge downloads the bytes from its OTA URL, so
+the project artifact name must remain unchanged.
+
 ```sh
 source /Users/peter/.espressif/v6.0.1/esp-idf/export.sh
 idf.py set-target esp32s3

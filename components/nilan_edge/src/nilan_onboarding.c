@@ -10,22 +10,34 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_http_server.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 
 #define CLAIM_TOKEN_LIFETIME_US (600ULL * 1000000ULL)
 #define TOKEN_MAX_LEN 128U
-#define BODY_MAX_LEN 1400U
+#define BODY_MAX_LEN 4096U
 
 static nilan_onboarding_reload_mqtt_fn s_reload_mqtt;
 static char s_claim_token[7];
 static uint64_t s_claim_expires_us;
+static char s_onboarding_body[BODY_MAX_LEN];
+
+static void mqtt_reload_task(void *arg)
+{
+    (void)arg;
+    const bool reloaded = s_reload_mqtt != NULL && s_reload_mqtt();
+    ESP_LOGI("nilan_onboarding", "MQTT reload after onboarding: %s", reloaded ? "ok" : "failed");
+    vTaskDelete(NULL);
+}
 
 static void device_id(char *out, size_t out_len)
 {
     uint8_t mac[6] = {0};
     (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    (void)snprintf(out, out_len, "zmartify-hvac-nilan-%02x%02x%02x%02x%02x%02x",
-                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    (void)snprintf(out, out_len, "zmartify-hvac-nilan-%02x%02x%02x",
+                   mac[3], mac[4], mac[5]);
 }
 
 static bool nvs_string(const char *key, char *out, size_t out_len)
@@ -88,10 +100,27 @@ static bool json_i32(const char *body, const char *key, int32_t *out)
 
 static bool read_body(httpd_req_t *req, char *out, size_t out_len)
 {
-    if (req == NULL || out == NULL || out_len < 2U || req->content_len >= out_len) return false;
-    const int received = httpd_req_recv(req, out, req->content_len);
-    if (received <= 0) return false;
-    out[received] = '\0';
+    if (req == NULL || out == NULL || out_len < 2U) return false;
+    ESP_LOGI("nilan_onboarding", "request content length=%d, buffer=%u",
+             (int)req->content_len, (unsigned)out_len);
+    if ((size_t)req->content_len >= out_len) {
+        ESP_LOGW("nilan_onboarding", "request body rejected before receive");
+        return false;
+    }
+    size_t total = 0U;
+    unsigned timeout_retries = 0U;
+    ESP_LOGI("nilan_onboarding", "body length=%u", (unsigned)req->content_len);
+    while (total < req->content_len) {
+        const int received = httpd_req_recv(req, out + total, req->content_len - total);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            ESP_LOGW("nilan_onboarding", "body timeout after %u bytes", (unsigned)total);
+            if (++timeout_retries > 20U) return false;
+            continue;
+        }
+        if (received <= 0) return false;
+        total += (size_t)received;
+    }
+    out[total] = '\0';
     return true;
 }
 
@@ -183,8 +212,9 @@ esp_err_t nilan_onboarding_status_get_handler(httpd_req_t *req)
 
 esp_err_t nilan_onboarding_configure_post_handler(httpd_req_t *req)
 {
-    char body[BODY_MAX_LEN] = {0};
-    if (!read_body(req, body, sizeof(body))) {
+    memset(s_onboarding_body, 0, sizeof(s_onboarding_body));
+    char *body = s_onboarding_body;
+    if (!read_body(req, body, sizeof(s_onboarding_body))) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"error\":\"invalid request body\"}");
     }
@@ -239,11 +269,16 @@ esp_err_t nilan_onboarding_configure_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"error\":\"nvs commit failed\"}");
     }
     s_claim_token[0] = '\0';
-    const bool reloaded = s_reload_mqtt != NULL && s_reload_mqtt();
     char response[260];
-    (void)snprintf(response, sizeof(response), "{\"ok\":true,\"state\":\"claimed\",\"device_id\":\"%s\",\"mqtt_reload\":%s}", id, reloaded ? "true" : "false");
+    (void)snprintf(response, sizeof(response), "{\"ok\":true,\"state\":\"claimed\",\"device_id\":\"%s\",\"mqtt_reload\":\"scheduled\"}", id);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, response);
+    const esp_err_t response_err = httpd_resp_sendstr(req, response);
+    if (response_err == ESP_OK && s_reload_mqtt != NULL) {
+        if (xTaskCreate(mqtt_reload_task, "nilan_mqtt_reload", 4096, NULL, 4, NULL) != pdPASS) {
+            ESP_LOGW("nilan_onboarding", "Could not schedule MQTT reload after onboarding");
+        }
+    }
+    return response_err;
 }
 
 esp_err_t nilan_onboarding_reset_post_handler(httpd_req_t *req)
