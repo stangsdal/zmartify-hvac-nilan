@@ -26,20 +26,26 @@ commissioning endpoints:
 - `GET /status` - poll counters, freshness, heap and transport status.
 - `GET /version` - firmware, ESP-IDF, build and ELF identity metadata.
 - `GET /api/v1/nilan/state` - decoded CTS602 state and poll counters.
+  - `GET /api/v2/hvac/nilan` and `GET /api/v2/hvac/nilan/state` - stable v2 aliases for the decoded state API.
 - `GET /api/v1/nilan/raw` - development-only raw read-only CTS602 register words.
 - `GET /identity` and `GET /claim-token` - Edge discovery and claim bootstrap.
 - `GET /onboarding/status` and `POST /onboarding/configure` - onboarding state
   and credential provisioning; configuration currently takes effect after a
   reboot.
 - `POST /api/v1/nilan/ventilation` - development-only global ventilation step write with read-back.
+  - `POST /api/v2/hvac/nilan/ventilation` - stable v2 alias accepting `{"level":1}` through `{"level":4}`.
 - `POST /api/v1/nilan/inlet-speed` - development-only temporary inlet output override (0-100%) with read-back.
+  - `POST /api/v2/hvac/nilan/inlet-speed` - stable v2 alias accepting `{"inlet_pct":0}` through `{"inlet_pct":100}`.
 - `POST /api/v1/nilan/exhaust-speed` - development-only temporary exhaust output override (0-100%) with read-back.
+  - `POST /api/v2/hvac/nilan/exhaust-speed` - stable v2 alias accepting `{"exhaust_pct":0}` through `{"exhaust_pct":100}`.
 - `POST /ota` - development-only firmware upload to the inactive OTA slot.
 - `POST /reboot` - development-only delayed reboot after an OTA upload.
 
 Onboarding provisions the Edge URL, MQTT credentials and device-admin token in
-NVS. After claiming, write, OTA and reboot endpoints require
-`Authorization: Bearer <device-admin-token>`. MQTT v2 command subscriptions are
+NVS. After claiming, write endpoints require
+`Authorization: Bearer <device-admin-token>`. The development-only `/ota` and
+`/reboot` endpoints are intentionally unauthenticated and should remain limited
+to a trusted local network. MQTT v2 command subscriptions are
 available for ventilation, inlet speed and exhaust speed when
 `CONFIG_NILAN_ENABLE_MQTT_COMMANDS=y`; each command publishes a read-back-based
 outcome. Edge-staged pull OTA is implemented: after onboarding, the device

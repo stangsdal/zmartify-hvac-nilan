@@ -31,6 +31,7 @@ static void test_response_and_decode(void)
     assert(nilan_decode_state(control, 4, ventilation, 5, temperatures, 7, &state));
     assert(state.run && state.room_temperature_centi_c == 2150);
     assert(state.room_temperature_available && state.co2_available);
+    assert(state.humidity_available && state.humidity_centi_pct == 4800);
     assert(state.actual_inlet_level == 4 && state.filter_days_remaining == 72);
     temperatures[0] = 1;
     temperatures[5] = 55536;
@@ -40,6 +41,9 @@ static void test_response_and_decode(void)
     temperatures[5] = 650;
     assert(nilan_decode_state(control, 4, ventilation, 5, temperatures, 7, &state));
     assert(state.room_temperature_available && state.room_temperature_centi_c == -500);
+    temperatures[4] = (uint16_t)(int16_t)-26111;
+    assert(nilan_decode_state(control, 4, ventilation, 5, temperatures, 7, &state));
+    assert(!state.humidity_available);
 }
 
 static void test_guards(void)

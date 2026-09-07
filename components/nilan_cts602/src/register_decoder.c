@@ -30,6 +30,7 @@ bool nilan_decode_state(const uint16_t *control, size_t control_count,
     state->room_temperature_available = temperatures[0] != 1 &&
                                         state->room_temperature_centi_c >= -4000 &&
                                         state->room_temperature_centi_c <= 8000;
+    state->humidity_available = state->humidity_centi_pct >= 0 && state->humidity_centi_pct <= 10000;
     state->co2_available = temperatures[5] <= 5000;
     state->status = NILAN_VALUE_FRESH;
     return true;

@@ -42,10 +42,19 @@ typedef struct {
     int16_t humidity_centi_pct;
     uint16_t co2_ppm;
     bool room_temperature_available;
+    bool humidity_available;
     bool co2_available;
     uint8_t ventilation_level;
     uint8_t actual_inlet_level;
     uint8_t actual_exhaust_level;
+    uint16_t inlet_speed;
+    uint16_t exhaust_speed;
+    uint16_t run_set;
+    uint16_t mode_set;
+    uint16_t vent_set;
+    uint16_t temp_set;
+    uint16_t service_mode;
+    uint16_t service_pct;
     bool run;
     bool bypass_open;
     bool defrost_active;
@@ -96,6 +105,8 @@ enum {
     NILAN_HOLDING_MODE = 1002,
     NILAN_HOLDING_VENTILATION = 1003,
     NILAN_HOLDING_SETPOINT = 1004,
+    NILAN_HOLDING_SERVICE_MODE = 1005,
+    NILAN_HOLDING_SERVICE_PCT = 1006,
     NILAN_HOLDING_EXHAUST_SPEED = 200,
     NILAN_HOLDING_INLET_SPEED = 201,
 };
@@ -122,3 +133,4 @@ bool nilan_adapter_get_state(nilan_state_t *out_state, nilan_poll_stats_t *out_s
 bool nilan_adapter_set_ventilation(uint8_t level, uint16_t *out_readback);
 bool nilan_adapter_set_inlet_speed_pct(uint16_t pct, uint16_t *out_readback);
 bool nilan_adapter_set_exhaust_speed_pct(uint16_t pct, uint16_t *out_readback);
+bool nilan_adapter_set_control_register(uint16_t offset, uint16_t value, uint16_t *out_readback);

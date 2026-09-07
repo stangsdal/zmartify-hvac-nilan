@@ -16,9 +16,11 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "mbedtls/error.h"
 #include "mqtt_client.h"
 #include "nilan_cts602.h"
 #include "nilan_onboarding.h"
+#include "net.h"
 #include "nvs.h"
 #include "ota.h"
 
@@ -30,9 +32,30 @@ static esp_mqtt_client_handle_t s_mqtt;
 static httpd_handle_t s_http;
 static char s_device_id[64];
 static uint32_t s_last_ota_poll_ms;
+static bool s_mqtt_connected;
+static uint32_t s_command_received_count;
+static char s_last_command_id[72];
+static int s_mqtt_last_error;
+static int s_mqtt_tls_error;
+static int s_mqtt_tls_stack_error;
+static char s_mqtt_tls_stack_error_text[96];
+static char s_mqtt_uri[128];
+static char s_mqtt_user[64];
+static char s_mqtt_password[64];
+static char s_mqtt_client_id[64];
+static char s_mqtt_broker_common_name[128];
+static bool s_mqtt_start_attempted;
+static int s_mqtt_connect_return_code;
+static int s_mqtt_socket_errno;
 
 static bool mqtt_reload_from_nvs(void);
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data);
+static void mqtt_command_task(void *arg);
+
+typedef struct {
+    char topic[256];
+    char payload[512];
+} mqtt_command_job_t;
 
 static bool mqtt_json_i32(const char *payload, const char *key, int32_t *out)
 {
@@ -81,7 +104,8 @@ static int append_words(char *out, size_t out_len, int pos, const char *name,
 }
 
 static void load_mqtt_config(char *uri, size_t uri_len, char *user, size_t user_len,
-                             char *password, size_t password_len)
+                             char *password, size_t password_len,
+                             char *client_id, size_t client_id_len)
 {
     nvs_handle_t nvs;
     if (nvs_open("cfg", NVS_READONLY, &nvs) != ESP_OK) return;
@@ -90,8 +114,38 @@ static void load_mqtt_config(char *uri, size_t uri_len, char *user, size_t user_
     (void)nvs_get_str(nvs, "mqtt_uri", uri, &uri_len);
     (void)nvs_get_str(nvs, "mqtt_username", user, &user_len);
     (void)nvs_get_str(nvs, "mqtt_password", password, &password_len);
+    (void)nvs_get_str(nvs, "mqtt_client_id", client_id, &client_id_len);
     nvs_close(nvs);
     if (enabled == 0) uri[0] = '\0';
+}
+
+static void mqtt_set_broker_common_name_from_uri(const char *uri)
+{
+    s_mqtt_broker_common_name[0] = '\0';
+    if (uri == NULL || uri[0] == '\0') return;
+
+    const char *authority = strstr(uri, "://");
+    authority = authority == NULL ? uri : authority + 3;
+    const char *at = strchr(authority, '@');
+    if (at != NULL) authority = at + 1;
+
+    const char *host_start = authority;
+    const char *host_end = authority;
+    if (*host_start == '[') {
+        ++host_start;
+        host_end = strchr(host_start, ']');
+        if (host_end == NULL) return;
+    } else {
+        while (*host_end != '\0' && *host_end != ':' && *host_end != '/' &&
+               *host_end != '?' && *host_end != '#') {
+            ++host_end;
+        }
+    }
+
+    const size_t host_len = (size_t)(host_end - host_start);
+    if (host_len == 0U || host_len >= sizeof(s_mqtt_broker_common_name)) return;
+    memcpy(s_mqtt_broker_common_name, host_start, host_len);
+    s_mqtt_broker_common_name[host_len] = '\0';
 }
 
 static int state_json(char *out, size_t out_len)
@@ -101,25 +155,33 @@ static int state_json(char *out, size_t out_len)
     if (!nilan_adapter_get_state(&state, &stats)) return -1;
     const uint32_t age = state.last_success_ms > 0 ? now_ms() - state.last_success_ms : 0;
     char room_temperature[24];
+    char humidity[24];
     char co2[24];
     (void)snprintf(room_temperature, sizeof(room_temperature), state.room_temperature_available ? "%.2f" : "null",
                    state.room_temperature_centi_c / 100.0);
+    (void)snprintf(humidity, sizeof(humidity), state.humidity_available ? "%.2f" : "null",
+                   state.humidity_centi_pct / 100.0);
     (void)snprintf(co2, sizeof(co2), state.co2_available ? "%u" : "null", state.co2_ppm);
     return snprintf(out, out_len,
                     "{\"device_id\":\"%s\",\"online\":%s,\"controller_online\":%s,"
                     "\"freshness_age_ms\":%" PRIu32 ",\"run\":%s,\"ventilation_level\":%u,"
                     "\"actual_inlet_level\":%u,\"actual_exhaust_level\":%u,"
+                    "\"inlet_speed\":%u,\"exhaust_speed\":%u,"
+                    "\"run_set\":%u,\"mode_set\":%u,\"vent_set\":%u,\"temp_set\":%.2f,"
+                    "\"service_mode\":%u,\"service_pct\":%u,"
                     "\"room_temperature_c\":%s,\"inlet_temperature_c\":%.2f,"
                     "\"outlet_temperature_c\":%.2f,\"extract_temperature_c\":%.2f,"
-                    "\"humidity_pct\":%.2f,\"co2_ppm\":%s,\"filter_days_remaining\":%u,"
+                    "\"humidity_pct\":%s,\"co2_ppm\":%s,\"filter_days_remaining\":%u,"
                     "\"status\":\"%s\",\"poll_requests\":%" PRIu32 ",\"poll_responses\":%" PRIu32 "}",
                     s_device_id, stats.controller_online ? "true" : "false",
                     stats.controller_online ? "true" : "false", age, state.run ? "true" : "false",
                     state.ventilation_level, state.actual_inlet_level, state.actual_exhaust_level,
+                    state.inlet_speed, state.exhaust_speed, state.run_set, state.mode_set,
+                    state.vent_set, state.temp_set / 100.0, state.service_mode, state.service_pct,
                     room_temperature,
                     state.inlet_temperature_centi_c / 100.0,
                     state.outlet_temperature_centi_c / 100.0, state.extract_temperature_centi_c / 100.0,
-                    state.humidity_centi_pct / 100.0,
+                    humidity,
                     co2, state.filter_days_remaining,
                     state.status == NILAN_VALUE_FRESH ? "fresh" :
                     (state.status == NILAN_VALUE_STALE ? "stale" : "unavailable"),
@@ -137,15 +199,21 @@ static bool source_timestamp(char *out, size_t out_len)
 
 static int mqtt_state_json(char *out, size_t out_len)
 {
-    char state[1600];
+    char *state = malloc(1600);
     char timestamp[32];
-    if (state_json(state, sizeof(state)) < 0 || !source_timestamp(timestamp, sizeof(timestamp))) return -1;
+    if (state == NULL) return -1;
+    if (state_json(state, 1600) < 0 || !source_timestamp(timestamp, sizeof(timestamp))) {
+        free(state);
+        return -1;
+    }
     const esp_app_desc_t *app = esp_app_get_description();
-    return snprintf(out, out_len,
+    const int result = snprintf(out, out_len,
                     "{\"schema_version\":\"2.0\",\"source_timestamp\":\"%s\","
                     "\"firmware_version\":\"%s\",\"online\":true,\"mqtt_connected\":true,"
                     "\"hvac\":{\"nilan\":%s}}",
                     timestamp, app != NULL ? app->version : NILAN_FIRMWARE_VERSION, state);
+    free(state);
+    return result;
 }
 
 static esp_err_t raw_get_handler(httpd_req_t *req)
@@ -270,7 +338,13 @@ static int status_json(char *out, size_t out_len)
     const uint32_t age = state.last_success_ms > 0 ? now_ms() - state.last_success_ms : 0;
     return snprintf(out, out_len,
                     "{\"api_started\":true,\"read_only_adapter_started\":true,"
-                    "\"controller_online\":%s,\"state_status\":\"%s\","
+                       "\"controller_online\":%s,\"mqtt_connected\":%s,"
+                       "\"mqtt_last_error\":%d,"
+                       "\"mqtt_tls_error\":%d,\"mqtt_tls_stack_error\":%d,"
+                       "\"mqtt_tls_stack_error_text\":\"%s\","
+                       "\"mqtt_connect_return_code\":%d,\"mqtt_socket_errno\":%d,"
+                       "\"command_received_count\":%" PRIu32 ","
+                       "\"last_command_id\":\"%s\",\"state_status\":\"%s\","
                     "\"uptime_ms\":%" PRIu32 ",\"free_heap_bytes\":%" PRIu32 ","
                     "\"min_free_heap_bytes\":%" PRIu32 ",\"freshness_age_ms\":%" PRIu32 ","
                     "\"poll_requests\":%" PRIu32 ",\"poll_responses\":%" PRIu32 ","
@@ -284,6 +358,15 @@ static int status_json(char *out, size_t out_len)
                     "\"last_update_ok\":%s,\"last_update_bytes\":%" PRIu32 ","
                     "\"last_error\":%d}}",
                     stats.controller_online ? "true" : "false",
+                    s_mqtt_connected ? "true" : "false",
+                    s_mqtt_last_error,
+                    s_mqtt_tls_error,
+                    s_mqtt_tls_stack_error,
+                    s_mqtt_tls_stack_error_text,
+                    s_mqtt_connect_return_code,
+                    s_mqtt_socket_errno,
+                    s_command_received_count,
+                    s_last_command_id,
                     state.status == NILAN_VALUE_FRESH ? "fresh" :
                     (state.status == NILAN_VALUE_STALE ? "stale" : "unavailable"),
                     now_ms(), (uint32_t)heap_caps_get_free_size(MALLOC_CAP_8BIT),
@@ -365,7 +448,6 @@ static esp_err_t version_get_handler(httpd_req_t *req)
 static esp_err_t ota_post_handler(httpd_req_t *req)
 {
 #if CONFIG_NILAN_ENABLE_DEV_OTA
-    if (!nilan_onboarding_authorized(req)) return ESP_OK;
     uint32_t written = 0;
     const esp_err_t err = ota_handle_http_upload(req, &written);
     if (err != ESP_OK) {
@@ -396,7 +478,6 @@ static void reboot_timer_callback(void *arg)
 static esp_err_t reboot_post_handler(httpd_req_t *req)
 {
 #if CONFIG_NILAN_ENABLE_DEV_OTA
-    if (!nilan_onboarding_authorized(req)) return ESP_OK;
     httpd_resp_set_type(req, "application/json");
     const esp_err_t err = httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
     if (err != ESP_OK) return err;
@@ -428,13 +509,19 @@ static esp_err_t state_get_handler(httpd_req_t *req)
 static void mqtt_publish_state(void)
 {
     if (!s_mqtt) return;
-    char payload[1900], topic[192];
-    const int len = mqtt_state_json(payload, sizeof(payload));
-    if (len < 0 || (size_t)len >= sizeof(payload)) return;
+    char *payload = malloc(1900);
+    if (payload == NULL) return;
+    char topic[192];
+    const int len = mqtt_state_json(payload, 1900);
+    if (len < 0 || (size_t)len >= 1900U) {
+        free(payload);
+        return;
+    }
     (void)snprintf(topic, sizeof(topic), "homie/5/%s/nilan/state", s_device_id);
     (void)esp_mqtt_client_publish(s_mqtt, topic, payload, len, 1, 1);
     (void)snprintf(topic, sizeof(topic), "zmartify/v2/devices/%s/state/hvac", s_device_id);
     (void)esp_mqtt_client_publish(s_mqtt, topic, payload, len, 1, 1);
+    free(payload);
 }
 
 static void mqtt_publish_homie_discovery(void)
@@ -540,6 +627,8 @@ static void mqtt_handle_nilan_command(const char *topic, const char *payload)
     }
     char command_id[72] = {0};
     (void)mqtt_json_string(payload, "command_id", command_id, sizeof(command_id));
+    s_command_received_count++;
+    strncpy(s_last_command_id, command_id, sizeof(s_last_command_id) - 1U);
     int32_t value = -1;
     bool ok = false;
     const char *command = "unknown";
@@ -565,19 +654,74 @@ static void mqtt_handle_nilan_command(const char *topic, const char *payload)
             ok = value >= 0 && value <= 100 && nilan_adapter_set_exhaust_speed_pct((uint16_t)value, &readback);
             (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback / 100U);
         }
+    } else if (strstr(topic, "/commands/hvac/run-set") != NULL) {
+        command = "hvac.set_run";
+        if (mqtt_json_i32(payload, "run_set", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 1 && nilan_adapter_set_control_register(NILAN_HOLDING_RUN, (uint16_t)value, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback);
+        }
+    } else if (strstr(topic, "/commands/hvac/mode-set") != NULL) {
+        command = "hvac.set_mode";
+        if (mqtt_json_i32(payload, "mode_set", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 3 && nilan_adapter_set_control_register(NILAN_HOLDING_MODE, (uint16_t)value, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback);
+        }
+    } else if (strstr(topic, "/commands/hvac/vent-set") != NULL) {
+        command = "hvac.set_ventilation_level";
+        if (mqtt_json_i32(payload, "vent_set", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 4 && nilan_adapter_set_control_register(NILAN_HOLDING_VENTILATION, (uint16_t)value, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback);
+        }
+    } else if (strstr(topic, "/commands/hvac/temp-set") != NULL) {
+        command = "hvac.set_temperature";
+        if (mqtt_json_i32(payload, "temp_set", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 100 && nilan_adapter_set_control_register(NILAN_HOLDING_SETPOINT, (uint16_t)value, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback);
+        }
+    } else if (strstr(topic, "/commands/hvac/service-mode") != NULL) {
+        command = "hvac.set_service_mode";
+        if (mqtt_json_i32(payload, "service_mode", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 8 && nilan_adapter_set_control_register(NILAN_HOLDING_SERVICE_MODE, (uint16_t)value, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback);
+        }
+    } else if (strstr(topic, "/commands/hvac/service-pct") != NULL) {
+        command = "hvac.set_service_pct";
+        if (mqtt_json_i32(payload, "service_pct", &value)) {
+            uint16_t readback = 0;
+            ok = value >= 0 && value <= 100 && nilan_adapter_set_control_register(NILAN_HOLDING_SERVICE_PCT, (uint16_t)value * 100U, &readback);
+            (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback / 100U);
+        }
     } else {
         return;
     }
+    ESP_LOGI(TAG, "Nilan command processed topic=%s ok=%s detail=%s",
+             topic, ok ? "true" : "false", detail);
     mqtt_publish_command_outcome(command_id, command, ok, detail);
 #else
     (void)topic; (void)payload;
 #endif
 }
 
+static void mqtt_command_task(void *arg)
+{
+    mqtt_command_job_t *job = arg;
+    if (job != NULL) {
+        mqtt_handle_nilan_command(job->topic, job->payload);
+        free(job);
+    }
+    vTaskDelete(NULL);
+}
+
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     (void)arg; (void)base;
     if (event_id == MQTT_EVENT_CONNECTED) {
+        s_mqtt_connected = true;
         esp_mqtt_event_handle_t event = event_data;
         s_mqtt = event->client;
         mqtt_publish_homie_discovery();
@@ -590,11 +734,33 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
         (void)snprintf(topic, sizeof(topic), "zmartify/v2/devices/%s/commands/hvac/exhaust-speed", s_device_id);
         (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
+        const char *control_topics[] = {"run-set", "mode-set", "vent-set", "temp-set", "service-mode", "service-pct"};
+        for (size_t i = 0; i < sizeof(control_topics) / sizeof(control_topics[0]); ++i) {
+            (void)snprintf(topic, sizeof(topic), "zmartify/v2/devices/%s/commands/hvac/%s", s_device_id, control_topics[i]);
+            (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
+        }
         (void)snprintf(topic, sizeof(topic), "homie/5/%s/gateway/ota-check/set", s_device_id);
         (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
 #endif
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
-        s_mqtt = NULL;
+        s_mqtt_connected = false;
+    } else if (event_id == MQTT_EVENT_ERROR) {
+        esp_mqtt_event_handle_t event = event_data;
+        if (event != NULL && event->error_handle != NULL) {
+            s_mqtt_last_error = (int)event->error_handle->error_type;
+            s_mqtt_tls_error = event->error_handle->esp_tls_last_esp_err;
+            s_mqtt_tls_stack_error = event->error_handle->esp_tls_stack_err;
+            mbedtls_strerror(-s_mqtt_tls_stack_error, s_mqtt_tls_stack_error_text,
+                             sizeof(s_mqtt_tls_stack_error_text));
+            s_mqtt_connect_return_code = event->error_handle->connect_return_code;
+            s_mqtt_socket_errno = event->error_handle->esp_transport_sock_errno;
+            ESP_LOGE(TAG, "MQTT error type=%d tls=%d stack=%d return=%d errno=%d",
+                     event->error_handle->error_type,
+                     event->error_handle->esp_tls_last_esp_err,
+                     event->error_handle->esp_tls_stack_err,
+                     event->error_handle->connect_return_code,
+                     event->error_handle->esp_transport_sock_errno);
+        }
     } else if (event_id == MQTT_EVENT_DATA) {
         esp_mqtt_event_handle_t event = event_data;
         if (event == NULL || event->topic == NULL || event->data == NULL) return;
@@ -603,7 +769,19 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         const size_t data_len = event->data_len < sizeof(payload) - 1U ? (size_t)event->data_len : sizeof(payload) - 1U;
         memcpy(topic, event->topic, topic_len); topic[topic_len] = '\0';
         memcpy(payload, event->data, data_len); payload[data_len] = '\0';
-        mqtt_handle_nilan_command(topic, payload);
+        mqtt_command_job_t *job = calloc(1, sizeof(*job));
+        if (job == NULL) {
+            ESP_LOGE(TAG, "Could not allocate MQTT command job");
+            return;
+        }
+        memcpy(job->topic, topic, topic_len + 1U);
+        memcpy(job->payload, payload, data_len + 1U);
+        if (xTaskCreate(mqtt_command_task, "nilan_cmd", 4096, job, 5, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "Could not start MQTT command task");
+            free(job);
+        } else {
+            ESP_LOGI(TAG, "Nilan command received topic=%s", topic);
+        }
     }
 }
 
@@ -611,6 +789,14 @@ static void publisher_task(void *arg)
 {
     (void)arg;
     while (true) {
+        net_status_t net_status = {0};
+        if (net_get_status(&net_status) != ESP_OK || !net_status.ntp_synced) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!s_mqtt_start_attempted) {
+            (void)mqtt_reload_from_nvs();
+        }
         mqtt_publish_state();
         if (s_mqtt != NULL && now_ms() - s_last_ota_poll_ms >= 300000U) {
             s_last_ota_poll_ms = now_ms();
@@ -622,23 +808,37 @@ static void publisher_task(void *arg)
 
 static bool mqtt_reload_from_nvs(void)
 {
+    s_mqtt_start_attempted = true;
+    s_mqtt_connected = false;
     if (s_mqtt != NULL) {
         (void)esp_mqtt_client_stop(s_mqtt);
         (void)esp_mqtt_client_destroy(s_mqtt);
         s_mqtt = NULL;
     }
 
-    char uri[128] = {0}, user[64] = {0}, password[64] = {0};
-    load_mqtt_config(uri, sizeof(uri), user, sizeof(user), password, sizeof(password));
-    if (uri[0] == '\0') return true;
+    memset(s_mqtt_uri, 0, sizeof(s_mqtt_uri));
+    memset(s_mqtt_user, 0, sizeof(s_mqtt_user));
+    memset(s_mqtt_password, 0, sizeof(s_mqtt_password));
+    memset(s_mqtt_client_id, 0, sizeof(s_mqtt_client_id));
+    load_mqtt_config(s_mqtt_uri, sizeof(s_mqtt_uri), s_mqtt_user, sizeof(s_mqtt_user),
+                     s_mqtt_password, sizeof(s_mqtt_password),
+                     s_mqtt_client_id, sizeof(s_mqtt_client_id));
+    if (s_mqtt_uri[0] == '\0') return true;
+    if (s_mqtt_client_id[0] != '\0') {
+        (void)snprintf(s_device_id, sizeof(s_device_id), "%s", s_mqtt_client_id);
+    }
+    mqtt_set_broker_common_name_from_uri(s_mqtt_uri);
 
     esp_mqtt_client_config_t cfg = {
-        .broker.address.uri = uri,
+        .broker.address.uri = s_mqtt_uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+        .broker.verification.common_name = s_mqtt_broker_common_name[0] != '\0'
+                                               ? s_mqtt_broker_common_name
+                                               : NULL,
         .credentials.client_id = s_device_id,
     };
-    if (user[0]) cfg.credentials.username = user;
-    if (password[0]) cfg.credentials.authentication.password = password;
+    if (s_mqtt_user[0]) cfg.credentials.username = s_mqtt_user;
+    if (s_mqtt_password[0]) cfg.credentials.authentication.password = s_mqtt_password;
     s_mqtt = esp_mqtt_client_init(&cfg);
     if (s_mqtt == NULL ||
         esp_mqtt_client_register_event(s_mqtt, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL) != ESP_OK ||
@@ -663,7 +863,15 @@ bool nilan_edge_start(void)
     const httpd_uri_t state_uri = {
         .uri = "/api/v1/nilan/state", .method = HTTP_GET, .handler = state_get_handler
     };
+    const httpd_uri_t v2_state_uri = {
+        .uri = "/api/v2/hvac/nilan/state", .method = HTTP_GET, .handler = state_get_handler
+    };
+    const httpd_uri_t v2_nilan_uri = {
+        .uri = "/api/v2/hvac/nilan", .method = HTTP_GET, .handler = state_get_handler
+    };
     if (httpd_register_uri_handler(s_http, &state_uri) != ESP_OK) return false;
+    if (httpd_register_uri_handler(s_http, &v2_state_uri) != ESP_OK) return false;
+    if (httpd_register_uri_handler(s_http, &v2_nilan_uri) != ESP_OK) return false;
     const httpd_uri_t health_uri = {
         .uri = "/health", .method = HTTP_GET, .handler = health_get_handler
     };
@@ -680,12 +888,24 @@ bool nilan_edge_start(void)
         .uri = "/api/v1/nilan/ventilation", .method = HTTP_POST,
         .handler = ventilation_post_handler
     };
+    const httpd_uri_t v2_ventilation_uri = {
+        .uri = "/api/v2/hvac/nilan/ventilation", .method = HTTP_POST,
+        .handler = ventilation_post_handler
+    };
     const httpd_uri_t inlet_speed_uri = {
         .uri = "/api/v1/nilan/inlet-speed", .method = HTTP_POST,
         .handler = inlet_speed_post_handler
     };
+    const httpd_uri_t v2_inlet_speed_uri = {
+        .uri = "/api/v2/hvac/nilan/inlet-speed", .method = HTTP_POST,
+        .handler = inlet_speed_post_handler
+    };
     const httpd_uri_t exhaust_speed_uri = {
         .uri = "/api/v1/nilan/exhaust-speed", .method = HTTP_POST,
+        .handler = exhaust_speed_post_handler
+    };
+    const httpd_uri_t v2_exhaust_speed_uri = {
+        .uri = "/api/v2/hvac/nilan/exhaust-speed", .method = HTTP_POST,
         .handler = exhaust_speed_post_handler
     };
     const httpd_uri_t identity_uri = {
@@ -719,8 +939,11 @@ bool nilan_edge_start(void)
 #endif
 #if CONFIG_NILAN_ENABLE_DEV_WRITES
     if (httpd_register_uri_handler(s_http, &ventilation_uri) != ESP_OK) return false;
+    if (httpd_register_uri_handler(s_http, &v2_ventilation_uri) != ESP_OK) return false;
     if (httpd_register_uri_handler(s_http, &inlet_speed_uri) != ESP_OK) return false;
+    if (httpd_register_uri_handler(s_http, &v2_inlet_speed_uri) != ESP_OK) return false;
     if (httpd_register_uri_handler(s_http, &exhaust_speed_uri) != ESP_OK) return false;
+    if (httpd_register_uri_handler(s_http, &v2_exhaust_speed_uri) != ESP_OK) return false;
 #endif
 #if CONFIG_NILAN_ENABLE_DEV_OTA
     const httpd_uri_t ota_uri = {
@@ -733,22 +956,5 @@ bool nilan_edge_start(void)
         httpd_register_uri_handler(s_http, &reboot_uri) != ESP_OK) return false;
 #endif
 
-    char uri[128] = {0}, user[64] = {0}, password[64] = {0};
-    load_mqtt_config(uri, sizeof(uri), user, sizeof(user), password, sizeof(password));
-    if (uri[0] != '\0') {
-        esp_mqtt_client_config_t cfg = {
-            .broker.address.uri = uri,
-            .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-            .credentials.client_id = s_device_id,
-        };
-        if (user[0]) cfg.credentials.username = user;
-        if (password[0]) cfg.credentials.authentication.password = password;
-        s_mqtt = esp_mqtt_client_init(&cfg);
-        if (!s_mqtt ||
-            esp_mqtt_client_register_event(s_mqtt, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL) != ESP_OK ||
-            esp_mqtt_client_start(s_mqtt) != ESP_OK) return false;
-    } else {
-        ESP_LOGI(TAG, "MQTT disabled or not configured");
-    }
     return xTaskCreate(publisher_task, "nilan_pub", 4096, NULL, 4, NULL) == pdPASS;
 }

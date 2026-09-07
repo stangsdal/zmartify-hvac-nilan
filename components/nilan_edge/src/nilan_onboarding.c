@@ -219,7 +219,7 @@ esp_err_t nilan_onboarding_configure_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"error\":\"invalid request body\"}");
     }
 
-    char state[32], claim[16] = {0}, admin[TOKEN_MAX_LEN] = {0};
+    char state[32], stored_admin[TOKEN_MAX_LEN] = {0}, claim[16] = {0}, admin[TOKEN_MAX_LEN] = {0};
     onboarding_state(state, sizeof(state));
     const bool has_claim = json_string(body, "claim_token", claim, sizeof(claim));
     const bool has_admin = json_string(body, "device_admin_token", admin, sizeof(admin));
@@ -229,7 +229,7 @@ esp_err_t nilan_onboarding_configure_post_handler(httpd_req_t *req)
             httpd_resp_set_status(req, "403 Forbidden");
             return httpd_resp_sendstr(req, "{\"error\":\"invalid claim token\"}");
         }
-    } else if (!has_admin || !bearer_matches(req) || !nvs_string("ob_admin_token", state, sizeof(state)) || strcmp(admin, state) != 0) {
+    } else if (!has_admin || !bearer_matches(req) || !nvs_string("ob_admin_token", stored_admin, sizeof(stored_admin)) || strcmp(admin, stored_admin) != 0) {
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_sendstr(req, "{\"error\":\"invalid device admin token\"}");
     }
