@@ -98,8 +98,15 @@ static void process_writes(void);
 
 static bool poll_once(void)
 {
-    uint16_t control[4], ventilation[5], temperatures[7], alarms[10], control_sets[6];
+    uint16_t versions[4], sensors[10], outputs[2], control[4], ventilation[5];
+    uint16_t temperatures[7], alarms[10], control_sets[6];
     uint16_t inlet_speed_raw = 0, exhaust_speed_raw = 0;
+    if (!read_group(NILAN_INPUT_VERSION_BASE, 4, versions)) return false;
+    process_writes();
+    if (!read_group(NILAN_INPUT_SENSOR_BASE, 10, sensors)) return false;
+    process_writes();
+    if (!read_group(NILAN_OUTPUT_BYPASS_BASE, 2, outputs)) return false;
+    process_writes();
     if (!read_group(NILAN_INPUT_CONTROL_BASE, 4, control)) return false;
     process_writes();
     if (!read_group(NILAN_INPUT_VENTILATION_BASE, 5, ventilation)) return false;
@@ -115,7 +122,8 @@ static bool poll_once(void)
     if (!read_group_function(3, NILAN_HOLDING_EXHAUST_SPEED, 1, &exhaust_speed_raw)) return false;
 
     nilan_state_t next = {0};
-    if (!nilan_decode_state(control, 4, ventilation, 5, temperatures, 7, &next)) {
+    if (!nilan_decode_state(versions, 4, sensors, 10, outputs, 2,
+                            control, 4, ventilation, 5, temperatures, 7, &next)) {
         return false;
     }
     memcpy(next.raw_alarms, alarms, sizeof(next.raw_alarms));

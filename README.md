@@ -2,12 +2,18 @@
 
 ESP-IDF firmware foundation for a Nilan Comfort 302 / CTS602 gateway.
 
+Current verified field firmware: `0.3.7`.
+
 ## Current implementation
 
 - ESP32-S3R8 ESP-IDF project with 16 MB flash and 8 MB octal PSRAM.
 - CTS602 Modbus RTU CRC-16 and request/response framing.
 - Protocol offsets and guarded MVP write targets.
 - Typed ventilation and temperature state decoder.
+- Extended CTS602 telemetry for controller/application versions, actual mode,
+  bypass state, board temperature, and T1/T2/T3/T4/T7/T8/T9 sensors.
+- Persisted filter interval selection and MQTT commands for filter interval and
+  filter reset with read-back validation.
 - Reuses the AHC9000 checkout's `board` and `comm_rs485` components through the
   configurable `NILAN_AHC9000_PLATFORM_DIR` CMake path.
 - Starts the shared RS485 transport with CTS602 settings (`19200 8E1`, default
@@ -46,7 +52,8 @@ NVS. After claiming, write endpoints require
 `Authorization: Bearer <device-admin-token>`. The development-only `/ota` and
 `/reboot` endpoints are intentionally unauthenticated and should remain limited
 to a trusted local network. MQTT v2 command subscriptions are
-available for ventilation, inlet speed and exhaust speed when
+available for ventilation, inlet speed, exhaust speed, filter interval, and
+filter reset when
 `CONFIG_NILAN_ENABLE_MQTT_COMMANDS=y`; each command publishes a read-back-based
 outcome. Edge-staged pull OTA is implemented: after onboarding, the device
 polls Edge periodically and can also be triggered through
@@ -83,10 +90,10 @@ On the next boot, the application marks the image valid after startup
 initialization; a failed boot remains pending verification and is eligible for
 ESP-IDF rollback.
 
-The current firmware is intentionally a commissioning scaffold. Network
-provisioning, authenticated API, MQTT, OTA and production Edge onboarding remain
-staged commissioning work; the shared platform is available as an external
-component source.
+The current firmware is commissioning-validated with Edge onboarding, MQTT v2
+state and commands, and Edge-staged pull OTA. Local development OTA,
+diagnostics, and physical writes remain explicitly gated and must be disabled
+before exposing the device outside a trusted commissioning network.
 
 ## Build and test
 
@@ -101,10 +108,14 @@ firmware version. The Edge-compatible build artifact is always
 `build/zmartify_hvac_nilan.bin`; Edge downloads the bytes from its OTA URL, so
 the project artifact name must remain unchanged.
 
+Release builds must use `./ops/build_firmware_release.sh`. The command builds
+the firmware and publishes immutable, versioned OTA and USB recovery artifacts
+to the shared Zmartify firmware library. An already published version is
+rejected, so bump `CONFIG_APP_PROJECT_VER` before every release.
+
 ```sh
 source /Users/peter/.espressif/v6.0.1/esp-idf/export.sh
-idf.py set-target esp32s3
-idf.py build
+./ops/build_firmware_release.sh
 sh tests/run_host_tests.sh
 ```
 

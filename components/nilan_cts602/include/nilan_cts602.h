@@ -31,6 +31,8 @@ typedef enum {
 } nilan_airflow_control_t;
 
 typedef struct {
+    uint16_t raw_version[4];
+    uint16_t raw_sensors[10];
     uint16_t raw[7];
     uint16_t raw_ventilation[5];
     uint16_t raw_temperature[7];
@@ -56,8 +58,22 @@ typedef struct {
     uint16_t service_mode;
     uint16_t service_pct;
     bool run;
+    uint16_t mode_actual;
     bool bypass_open;
+    bool bypass_close;
     bool defrost_active;
+    uint16_t bus_version;
+    uint16_t app_version_major;
+    uint16_t app_version_minor;
+    uint16_t app_version_release;
+    int16_t controller_board_temperature_centi_c;
+    int16_t t1_intake_centi_c;
+    int16_t t2_inlet_centi_c;
+    int16_t t3_exhaust_centi_c;
+    int16_t t4_outlet_centi_c;
+    int16_t t7_inlet_centi_c;
+    int16_t t8_outdoor_centi_c;
+    int16_t t9_heater_centi_c;
     uint16_t filter_days_remaining;
     nilan_value_status_t status;
     uint32_t last_success_ms;
@@ -96,6 +112,8 @@ typedef struct {
 
 /* Protocol offsets from the CTS602 document, not global 3xxxx/4xxxx addresses. */
 enum {
+    NILAN_INPUT_VERSION_BASE = 0,
+    NILAN_OUTPUT_BYPASS_BASE = 102,
     NILAN_INPUT_ALARM_BASE = 400,
     NILAN_INPUT_SENSOR_BASE = 200,
     NILAN_INPUT_CONTROL_BASE = 1000,
@@ -109,9 +127,11 @@ enum {
     NILAN_HOLDING_SERVICE_PCT = 1006,
     NILAN_HOLDING_EXHAUST_SPEED = 200,
     NILAN_HOLDING_INLET_SPEED = 201,
+    NILAN_HOLDING_FILTER_DAYS_SINCE = 3006,
 };
 
 uint16_t nilan_modbus_crc16(const uint8_t *data, size_t length);
+void nilan_decode_text_word(uint16_t value, char out[3]);
 size_t nilan_build_read_request(uint8_t slave, uint8_t function, uint16_t offset,
                                 uint16_t quantity, uint8_t *out, size_t out_size);
 size_t nilan_build_write_request(uint8_t slave, uint16_t offset, uint16_t value,
@@ -121,11 +141,15 @@ bool nilan_validate_read_response(const uint8_t *frame, size_t length, uint8_t s
                                   size_t *payload_length);
 bool nilan_validate_write_response(const uint8_t *frame, size_t length, uint8_t slave,
                                    uint16_t offset, uint16_t quantity);
-bool nilan_decode_state(const uint16_t *control, size_t control_count,
+bool nilan_decode_state(const uint16_t *versions, size_t version_count,
+                        const uint16_t *sensors, size_t sensor_count,
+                        const uint16_t *outputs, size_t output_count,
+                        const uint16_t *control, size_t control_count,
                         const uint16_t *ventilation, size_t ventilation_count,
                         const uint16_t *temperatures, size_t temperature_count,
                         nilan_state_t *state);
 bool nilan_validate_command(const nilan_command_t *command);
+bool nilan_filter_reset_offset(uint16_t interval_days, uint16_t *out_days_since);
 
 /* Starts the read-only CTS602 poller on an already started shared RS485 bus. */
 bool nilan_adapter_start(uint8_t slave_address);

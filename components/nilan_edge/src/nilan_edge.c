@@ -47,6 +47,7 @@ static char s_mqtt_broker_common_name[128];
 static bool s_mqtt_start_attempted;
 static int s_mqtt_connect_return_code;
 static int s_mqtt_socket_errno;
+static uint16_t s_filter_interval_days = 365;
 
 static bool mqtt_reload_from_nvs(void);
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data);
@@ -115,8 +116,27 @@ static void load_mqtt_config(char *uri, size_t uri_len, char *user, size_t user_
     (void)nvs_get_str(nvs, "mqtt_username", user, &user_len);
     (void)nvs_get_str(nvs, "mqtt_password", password, &password_len);
     (void)nvs_get_str(nvs, "mqtt_client_id", client_id, &client_id_len);
+    uint16_t filter_interval_days = 0;
+    if (nvs_get_u16(nvs, "filter_days", &filter_interval_days) == ESP_OK &&
+        (filter_interval_days == 183 || filter_interval_days == 274 || filter_interval_days == 365)) {
+        s_filter_interval_days = filter_interval_days;
+    }
     nvs_close(nvs);
     if (enabled == 0) uri[0] = '\0';
+}
+
+static bool save_filter_interval(uint16_t interval_days)
+{
+    uint16_t ignored = 0;
+    if (!nilan_filter_reset_offset(interval_days, &ignored)) return false;
+    nvs_handle_t nvs = 0;
+    if (nvs_open("cfg", NVS_READWRITE, &nvs) != ESP_OK) return false;
+    esp_err_t err = nvs_set_u16(nvs, "filter_days", interval_days);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    if (err != ESP_OK) return false;
+    s_filter_interval_days = interval_days;
+    return true;
 }
 
 static void mqtt_set_broker_common_name_from_uri(const char *uri)
@@ -157,6 +177,12 @@ static int state_json(char *out, size_t out_len)
     char room_temperature[24];
     char humidity[24];
     char co2[24];
+    char app_version_major[3];
+    char app_version_minor[3];
+    char app_version_release[3];
+    nilan_decode_text_word(state.app_version_major, app_version_major);
+    nilan_decode_text_word(state.app_version_minor, app_version_minor);
+    nilan_decode_text_word(state.app_version_release, app_version_release);
     (void)snprintf(room_temperature, sizeof(room_temperature), state.room_temperature_available ? "%.2f" : "null",
                    state.room_temperature_centi_c / 100.0);
     (void)snprintf(humidity, sizeof(humidity), state.humidity_available ? "%.2f" : "null",
@@ -165,24 +191,39 @@ static int state_json(char *out, size_t out_len)
     return snprintf(out, out_len,
                     "{\"device_id\":\"%s\",\"online\":%s,\"controller_online\":%s,"
                     "\"freshness_age_ms\":%" PRIu32 ",\"run\":%s,\"ventilation_level\":%u,"
+                    "\"run_actual\":%s,\"mode_actual\":%u,"
+                    "\"bypass_open\":%s,\"bypass_close\":%s,"
                     "\"actual_inlet_level\":%u,\"actual_exhaust_level\":%u,"
                     "\"inlet_speed\":%u,\"exhaust_speed\":%u,"
                     "\"run_set\":%u,\"mode_set\":%u,\"vent_set\":%u,\"temp_set\":%.2f,"
                     "\"service_mode\":%u,\"service_pct\":%u,"
                     "\"room_temperature_c\":%s,\"inlet_temperature_c\":%.2f,"
                     "\"outlet_temperature_c\":%.2f,\"extract_temperature_c\":%.2f,"
+                    "\"t1_intake_c\":%.2f,\"t2_inlet_c\":%.2f,\"t3_exhaust_c\":%.2f,"
+                    "\"t4_outlet_c\":%.2f,\"t7_inlet_c\":%.2f,\"t8_outdoor_c\":%.2f,"
+                    "\"t9_heater_c\":%.2f,\"controller_board_temperature_c\":%.2f,"
+                    "\"bus_version\":%u,\"app_version_major\":\"%s\","
+                    "\"app_version_minor\":\"%s\",\"app_version_release\":\"%s\","
                     "\"humidity_pct\":%s,\"co2_ppm\":%s,\"filter_days_remaining\":%u,"
+                    "\"filter_interval_days\":%u,"
                     "\"status\":\"%s\",\"poll_requests\":%" PRIu32 ",\"poll_responses\":%" PRIu32 "}",
                     s_device_id, stats.controller_online ? "true" : "false",
                     stats.controller_online ? "true" : "false", age, state.run ? "true" : "false",
-                    state.ventilation_level, state.actual_inlet_level, state.actual_exhaust_level,
+                    state.ventilation_level, state.run ? "true" : "false", state.mode_actual,
+                    state.bypass_open ? "true" : "false", state.bypass_close ? "true" : "false",
+                    state.actual_inlet_level, state.actual_exhaust_level,
                     state.inlet_speed, state.exhaust_speed, state.run_set, state.mode_set,
                     state.vent_set, state.temp_set / 100.0, state.service_mode, state.service_pct,
                     room_temperature,
                     state.inlet_temperature_centi_c / 100.0,
                     state.outlet_temperature_centi_c / 100.0, state.extract_temperature_centi_c / 100.0,
+                    state.t1_intake_centi_c / 100.0, state.t2_inlet_centi_c / 100.0,
+                    state.t3_exhaust_centi_c / 100.0, state.t4_outlet_centi_c / 100.0,
+                    state.t7_inlet_centi_c / 100.0, state.t8_outdoor_centi_c / 100.0,
+                    state.t9_heater_centi_c / 100.0, state.controller_board_temperature_centi_c / 100.0,
+                    state.bus_version, app_version_major, app_version_minor, app_version_release,
                     humidity,
-                    co2, state.filter_days_remaining,
+                    co2, state.filter_days_remaining, s_filter_interval_days,
                     state.status == NILAN_VALUE_FRESH ? "fresh" :
                     (state.status == NILAN_VALUE_STALE ? "stale" : "unavailable"),
                     stats.request_count, stats.response_count);
@@ -696,6 +737,23 @@ static void mqtt_handle_nilan_command(const char *topic, const char *payload)
             ok = value >= 0 && value <= 100 && nilan_adapter_set_control_register(NILAN_HOLDING_SERVICE_PCT, (uint16_t)value * 100U, &readback);
             (void)snprintf(detail, sizeof(detail), "requested=%ld readback=%u", (long)value, readback / 100U);
         }
+    } else if (strstr(topic, "/commands/hvac/filter-interval") != NULL) {
+        command = "hvac.set_filter_interval";
+        if (mqtt_json_i32(payload, "filter_interval_days", &value)) {
+            ok = value >= 0 && value <= UINT16_MAX && save_filter_interval((uint16_t)value);
+            (void)snprintf(detail, sizeof(detail), "interval_days=%ld", (long)value);
+        }
+    } else if (strstr(topic, "/commands/hvac/filter-reset") != NULL) {
+        command = "hvac.reset_filter";
+        if (mqtt_json_i32(payload, "filter_interval_days", &value) && value >= 0 && value <= UINT16_MAX) {
+            uint16_t days_since = 0;
+            uint16_t readback = 0;
+            ok = nilan_filter_reset_offset((uint16_t)value, &days_since) &&
+                 nilan_adapter_set_control_register(NILAN_HOLDING_FILTER_DAYS_SINCE, days_since, &readback);
+            if (ok) ok = save_filter_interval((uint16_t)value);
+            (void)snprintf(detail, sizeof(detail), "interval_days=%ld days_since=%u readback=%u",
+                           (long)value, days_since, readback);
+        }
     } else {
         return;
     }
@@ -734,7 +792,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
         (void)snprintf(topic, sizeof(topic), "zmartify/v2/devices/%s/commands/hvac/exhaust-speed", s_device_id);
         (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
-        const char *control_topics[] = {"run-set", "mode-set", "vent-set", "temp-set", "service-mode", "service-pct"};
+        const char *control_topics[] = {"run-set", "mode-set", "vent-set", "temp-set", "service-mode", "service-pct", "filter-interval", "filter-reset"};
         for (size_t i = 0; i < sizeof(control_topics) / sizeof(control_topics[0]); ++i) {
             (void)snprintf(topic, sizeof(topic), "zmartify/v2/devices/%s/commands/hvac/%s", s_device_id, control_topics[i]);
             (void)esp_mqtt_client_subscribe(s_mqtt, topic, 1);
