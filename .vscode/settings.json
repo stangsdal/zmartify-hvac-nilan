@@ -1,4 +1,12 @@
 {
-    "idf.currentSetup": "/Users/peter/.espressif/v6.0.1/esp-idf",
-    "idf.port": "/dev/tty.usbmodem101"
+  "idf.extensionActivationMode": "detect",
+  "idf.currentSetup": "/Users/peter/.espressif/v6.1/esp-idf",
+  "idf.port": "/dev/tty.usbmodem101",
+  "idf.customExtraVars": {},
+  "clangd.path": "/Users/peter/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/Users/peter/Dev/zmartify-hvac-nilan/build"
+  ]
 }

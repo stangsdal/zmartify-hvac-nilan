@@ -114,7 +114,7 @@ to the shared Zmartify firmware library. An already published version is
 rejected, so bump `CONFIG_APP_PROJECT_VER` before every release.
 
 ```sh
-source /Users/peter/.espressif/v6.0.1/esp-idf/export.sh
+source /Users/peter/.espressif/v6.1/esp-idf/export.sh
 ./ops/build_firmware_release.sh
 sh tests/run_host_tests.sh
 ```
